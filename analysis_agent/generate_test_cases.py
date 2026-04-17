@@ -68,64 +68,117 @@ def collect_inputs(workspace_root: Path, spec_path: Path, code_paths: Iterable[P
     return InputBundle(spec_text=spec_text, code_texts=code_texts, existing_tests_text=existing_tests_text)
 
 
-def build_prompt(inputs: InputBundle) -> str:
-    code_sections = "\n\n".join(
-        f"[FILE] {path}\n```text\n{content}\n```" for path, content in inputs.code_texts.items()
-    )
-
+def build_prompt(inputs: InputBundle, test_type: str = "all") -> str:
+    """Build prompt for test case generation.
+    
+    Args:
+        inputs: InputBundle containing spec, code, and tests
+        test_type: 'blackbox', 'whitebox', or 'all'
+    """
+    if test_type == "blackbox":
+        include_spec = True
+        include_code = False
+        source_desc = "规格说明书、已有测试用例"
+        code_note = "\n\n注：黑盒测试仅基于规格说明书，不参考代码实现。"
+    elif test_type == "whitebox":
+        include_spec = False
+        include_code = True
+        source_desc = "待测代码、已有测试用例"
+        code_note = "\n\n注：白盒测试仅基于代码实现，不参考规格说明书。"
+    else:  # test_type == "all"
+        include_spec = True
+        include_code = True
+        source_desc = "规格说明书、待测代码、已有测试用例"
+        code_note = ""
+    
+    code_sections = ""
+    if include_code:
+        code_sections = "\n\n".join(
+            f"[FILE] {path}\n```text\n{content}\n```" for path, content in inputs.code_texts.items()
+        )
+    
+    test_type_desc = {
+        "blackbox": "黑盒测试用例",
+        "whitebox": "白盒测试用例",
+        "all": "测试用例"
+    }.get(test_type, "测试用例")
+    
     json_template = """{
     "test_case": [
         {
             "id": "001",
-            "input": "Xinjiang\n2\nSKU_001 MechanicalKeyboard 299 1 1.2 0 10\nSKU_002 SpecialMousePad 9.9 2 0.1 1 5\n1\nCPN_100 discount 0.9 200 0 1\n",
+            "input": "Xinjiang\\n2\\nSKU_001 MechanicalKeyboard 299 1 1.2 0 10\\nSKU_002 SpecialMousePad 9.9 2 0.1 1 5\\n1\\nCPN_100 discount 0.9 200 0 1\\n",
             "output": "status=SUCCESS final_payable=318.8"
+        },
+        {
+            "id": "002",
+            "input": "Beijing\\n1\\nSKU_001 MechanicalKeyboard 299 1 1.2 0 0\\n0\\n",
+            "output": "status=SUCCESS final_payable=299"
+        },
+        {
+            "id": "003",
+            "input": "Beijing\\n1\\nSKU_010 Cable 20 1 0.2 0 100\\n0\\n",
+            "output": "status=SUCCESS final_payable=14"
         }
     ]
 }"""
 
-    prompt_template = """你是软件测试测试用例生成器。请严格按照下面要求输出。
-
-任务：根据规格说明书、待测代码、已有测试用例，生成新的测试用例 JSON。
-
-输出格式：
-1. 先输出简短分析，1 到 3 段即可。
-2. 然后输出 JSON，且必须被以下两行标记包裹：
-<<<json_start>>>
-<<<json_end>>>
-3. 标记之间只能放 JSON，不能放代码块、注释、解释文字。
-
-JSON 必须完全符合这个结构，字段名、层级、类型都不能改：
-<<JSON_TEMPLATE>>
-
-生成规则：
-- 顶层只能有 test_case。
-- test_case 是数组，至少 50 条。
-- 每条用例只允许 id、input、output 三个字段。
-- id 必须是三位数字字符串，从 001 开始递增。
-- input 必须是可直接喂给程序的原始输入，保留换行。
-- output 必须是期望输出字符串，格式与样例一致，如 status=SUCCESS final_payable=318.8。
-- 尽量覆盖黑盒、白盒、边界、异常、优惠券、地区运费等场景。
-- 尽量不要与已有测试用例重复。
-- 如果发现规格、代码、样例冲突，在简短分析里指出。
-
-输入材料：
-
-规格说明书：
-```markdown
-{inputs.spec_text}
-```
-
-待测代码：
-{code_sections}
-
-已有测试用例：
-```json
-{inputs.existing_tests_text}
-```
-
-只输出“简短分析 + 标记包裹的 JSON”，不要输出其他内容。"""
-
-    return prompt_template.replace("<<JSON_TEMPLATE>>", json_template)
+    prompt_parts = [
+        f"你是软件测试{test_type_desc}生成器。请严格按照下面要求输出。",
+        f"",
+        f"任务：根据{source_desc}，生成新的{test_type_desc}JSON。",
+        f"",
+        "输出格式：",
+        "1. 先输出简短分析，1 到 3 段即可。",
+        "2. 然后输出 JSON，且必须被以下两行标记包裹：",
+        JSON_START_MARKER,
+        JSON_END_MARKER,
+        "3. 标记之间只能放 JSON，不能放代码块、注释、解释文字。",
+        "",
+        "JSON 必须完全符合这个结构，字段名、层级、类型都不能改：",
+        json_template,
+        "",
+        "生成规则：",
+        "- 顶层只能有 test_case。",
+        "- test_case 是数组，至少 8 条。",
+        "- 每条用例只允许 id、input、output 三个字段。",
+        "- id 必须是三位数字字符串，从 001 开始递增。这是新生成用例集合的独立编号，不要基于已有测试用例的ID继续编号。",
+        "- input 必须是可直接喂给程序的原始输入，保留换行。",
+        "- output 必须是期望输出字符串，格式与样例一致，如 status=SUCCESS final_payable=318.8。",
+        "- 尽量覆盖黑盒、白盒、边界、异常、优惠券、地区运费等场景。",
+        "- 尽量不要与已有测试用例重复。",
+        "- 如果发现规格、代码、样例冲突，在简短分析里指出。",
+        "",
+        "输入材料：",
+    ]
+    
+    if include_spec:
+        prompt_parts.extend([
+            "",
+            "规格说明书：",
+            "```markdown",
+            inputs.spec_text,
+            "```",
+        ])
+    
+    if include_code and code_sections:
+        prompt_parts.extend([
+            "",
+            "待测代码：",
+            code_sections,
+        ])
+    
+    prompt_parts.extend([
+        "",
+        "已有测试用例：",
+        "```json",
+        inputs.existing_tests_text,
+        "```",
+        "",
+        f"只输出\"简短分析 + 标记包裹的 JSON\"，不要输出其他内容。{code_note}",
+    ])
+    
+    return "\n".join(prompt_parts)
 
 
 def call_deepseek(api_key: str, model: str, prompt: str, base_url: str, temperature: float, max_tokens: int) -> dict[str, Any]:
@@ -257,32 +310,39 @@ def ensure_output_dir(path: Path) -> Path:
     return path
 
 
-def create_batch_dir(output_dir: Path) -> Path:
+def create_batch_structure(output_dir: Path) -> tuple[Path, Path, Path]:
+    """Create batch directory with blackbox and whitebox subdirectories."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     batch_dir = output_dir / f"batch_{timestamp}"
     counter = 1
     while batch_dir.exists():
         batch_dir = output_dir / f"batch_{timestamp}_{counter:02d}"
         counter += 1
-    batch_dir.mkdir(parents=True, exist_ok=False)
-    return batch_dir
+    
+    blackbox_dir = batch_dir / "blackbox"
+    whitebox_dir = batch_dir / "whitebox"
+    blackbox_dir.mkdir(parents=True, exist_ok=False)
+    whitebox_dir.mkdir(parents=True, exist_ok=True)
+    
+    return batch_dir, blackbox_dir, whitebox_dir
 
 
-def save_outputs(batch_dir: Path, model_text: str, parsed_json: Any, raw_response: dict[str, Any], source_files: list[Path]) -> tuple[Path, Path, Path, Path]:
-    md_path = batch_dir / "model_output.md"
-    json_path = batch_dir / "test_cases.json"
-    raw_path = batch_dir / "last_llm_raw_response.txt"
+def save_outputs(output_subdir: Path, model_text: str, parsed_json: Any, raw_response: dict[str, Any], source_files: list[Path], test_type: str = "all") -> tuple[Path, Path, Path, Path]:
+    md_path = output_subdir / "model_output.md"
+    json_path = output_subdir / "test_cases.json"
+    raw_path = output_subdir / "last_llm_raw_response.txt"
 
     md_content = model_text.strip() + "\n"
     md_path.write_text(md_content, encoding="utf-8")
     json_path.write_text(json.dumps(parsed_json, ensure_ascii=False, indent=2), encoding="utf-8")
     raw_path.write_text(json.dumps(raw_response, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    manifest_path = batch_dir / "manifest.json"
+    manifest_path = output_subdir / "manifest.json"
     manifest = {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "model": raw_response.get("model"),
-        "batch_dir": str(batch_dir),
+        "test_type": test_type,
+        "output_dir": str(output_subdir),
         "source_files": [str(path) for path in source_files],
         "markdown_output": str(md_path),
         "json_output": str(json_path),
@@ -290,7 +350,7 @@ def save_outputs(batch_dir: Path, model_text: str, parsed_json: Any, raw_respons
     }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    return batch_dir, md_path, json_path, manifest_path
+    return output_subdir, md_path, json_path, manifest_path
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -311,6 +371,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--temperature", type=float, default=0.2, help="生成温度。")
     parser.add_argument("--max-tokens", type=int, default=4096, help="最大输出 token 数。")
     parser.add_argument("--print-json", action="store_true", help="将提取出的 JSON 额外打印到标准输出。")
+    parser.add_argument(
+        "--mode",
+        choices=["blackbox", "whitebox", "all"],
+        default="all",
+        help="测试类型：blackbox（仅规格）、whitebox（规格+代码）、all（同时生成两种）。默认 all。",
+    )
     return parser
 
 
@@ -343,47 +409,92 @@ def main() -> int:
         raise FileNotFoundError("以下输入文件不存在：\n" + "\n".join(str(path) for path in missing_paths))
 
     inputs = collect_inputs(workspace_root, spec_path, code_paths, tests_path)
-    prompt = build_prompt(inputs)
     api_key = load_api_key(script_dir)
 
-    response_payload = call_deepseek(
-        api_key=api_key,
-        model=args.model,
-        prompt=prompt,
-        base_url=args.base_url,
-        temperature=args.temperature,
-        max_tokens=args.max_tokens,
-    )
-    batch_dir = create_batch_dir(output_dir)
-    model_text = extract_model_text(response_payload)
+    batch_dir, blackbox_dir, whitebox_dir = create_batch_structure(output_dir)
+    results = []
 
-    try:
-        parsed_json, json_text = parse_json_with_recovery(model_text)
-    except Exception as exc:
-        raw_path = batch_dir / "last_llm_raw_response.txt"
-        raw_path.write_text(json.dumps(response_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        error_message = (
-            "模型输出中未能成功解析 JSON。原始响应已保存到 "
-            f"{raw_path}. 解析错误: {exc}"
+    # 黑盒测试
+    if args.mode in ("blackbox", "all"):
+        print("[INFO] 生成黑盒测试用例...")
+        blackbox_inputs = InputBundle(spec_text=inputs.spec_text, code_texts={}, existing_tests_text=inputs.existing_tests_text)
+        blackbox_prompt = build_prompt(blackbox_inputs, test_type="blackbox")
+        
+        blackbox_response = call_deepseek(
+            api_key=api_key,
+            model=args.model,
+            prompt=blackbox_prompt,
+            base_url=args.base_url,
+            temperature=args.temperature,
+            max_tokens=args.max_tokens,
         )
-        raise RuntimeError(error_message) from exc
+        blackbox_model_text = extract_model_text(blackbox_response)
+        
+        try:
+            blackbox_json, blackbox_json_text = parse_json_with_recovery(blackbox_model_text)
+        except Exception as exc:
+            raw_path = blackbox_dir / "last_llm_raw_response.txt"
+            raw_path.write_text(json.dumps(blackbox_response, ensure_ascii=False, indent=2), encoding="utf-8")
+            error_message = f"黑盒测试 JSON 解析失败。原始响应已保存到 {raw_path}. 错误: {exc}"
+            raise RuntimeError(error_message) from exc
+        
+        _, bb_md_path, bb_json_path, bb_manifest_path = save_outputs(
+            output_subdir=blackbox_dir,
+            model_text=blackbox_model_text,
+            parsed_json=blackbox_json,
+            raw_response=blackbox_response,
+            source_files=[spec_path, tests_path],
+            test_type="blackbox",
+        )
+        results.append(("blackbox", blackbox_dir, bb_md_path, bb_json_path, bb_manifest_path, len(blackbox_json_text)))
+        if args.print_json:
+            print("[BLACKBOX JSON]")
+            print(json.dumps(blackbox_json, ensure_ascii=False, indent=2))
 
-    batch_dir, md_path, json_path, manifest_path = save_outputs(
-        batch_dir=batch_dir,
-        model_text=model_text,
-        parsed_json=parsed_json,
-        raw_response=response_payload,
-        source_files=[spec_path, tests_path, *code_paths],
-    )
+    # 白盒测试
+    if args.mode in ("whitebox", "all"):
+        print("[INFO] 生成白盒测试用例...")
+        whitebox_prompt = build_prompt(inputs, test_type="whitebox")
+        
+        whitebox_response = call_deepseek(
+            api_key=api_key,
+            model=args.model,
+            prompt=whitebox_prompt,
+            base_url=args.base_url,
+            temperature=args.temperature,
+            max_tokens=args.max_tokens,
+        )
+        whitebox_model_text = extract_model_text(whitebox_response)
+        
+        try:
+            whitebox_json, whitebox_json_text = parse_json_with_recovery(whitebox_model_text)
+        except Exception as exc:
+            raw_path = whitebox_dir / "last_llm_raw_response.txt"
+            raw_path.write_text(json.dumps(whitebox_response, ensure_ascii=False, indent=2), encoding="utf-8")
+            error_message = f"白盒测试 JSON 解析失败。原始响应已保存到 {raw_path}. 错误: {exc}"
+            raise RuntimeError(error_message) from exc
+        
+        _, wb_md_path, wb_json_path, wb_manifest_path = save_outputs(
+            output_subdir=whitebox_dir,
+            model_text=whitebox_model_text,
+            parsed_json=whitebox_json,
+            raw_response=whitebox_response,
+            source_files=[spec_path, tests_path, *code_paths],
+            test_type="whitebox",
+        )
+        results.append(("whitebox", whitebox_dir, wb_md_path, wb_json_path, wb_manifest_path, len(whitebox_json_text)))
+        if args.print_json:
+            print("[WHITEBOX JSON]")
+            print(json.dumps(whitebox_json, ensure_ascii=False, indent=2))
 
-    if args.print_json:
-        print(json.dumps(parsed_json, ensure_ascii=False, indent=2))
-
-    print(f"batch_dir={batch_dir}")
-    print(f"markdown_saved={md_path}")
-    print(f"json_saved={json_path}")
-    print(f"manifest_saved={manifest_path}")
-    print(f"json_block_length={len(json_text)}")
+    print(f"\nbatch_dir={batch_dir}")
+    for test_type, test_dir, md_path, json_path, manifest_path, json_len in results:
+        print(f"[{test_type.upper()}]")
+        print(f"  dir={test_dir}")
+        print(f"  markdown_saved={md_path}")
+        print(f"  json_saved={json_path}")
+        print(f"  manifest_saved={manifest_path}")
+        print(f"  json_block_length={json_len}")
     return 0
 
 

@@ -39,13 +39,40 @@ python analysis_agent/generate_test_cases.py \
 
 ## 输出
 
-脚本会在输出目录下按每次运行创建一个批次文件夹，例如：
+脚本会在输出目录下按每次运行创建一个批次文件夹，并根据 `--mode` 参数分别生成黑盒和白盒测试用例。
 
-- `analysis_agent/generated/batch_20260417_153000/`
+批次文件夹结构示例：
 
-每个批次文件夹内包含：
+```
+analysis_agent/generated/batch_20260417_153000/
+├── blackbox/
+│   ├── model_output.md
+│   ├── test_cases.json
+│   ├── manifest.json
+│   └── last_llm_raw_response.txt
+└── whitebox/
+    ├── model_output.md
+    ├── test_cases.json
+    ├── manifest.json
+    └── last_llm_raw_response.txt
+```
+
+默认情况下（`--mode all`），会同时生成两种测试用例。
+
+## 参数说明
+
+- `--mode all`（默认）：同时调用两次 API，分别生成黑盒和白盒测试用例
+- `--mode blackbox`：仅生成黑盒测试用例（仅输入规格说明书）
+- `--mode whitebox`：仅生成白盒测试用例（输入规格说明书和代码）
+- `--output-dir`：指定输出根目录（默认 `analysis_agent/generated`）
+- `--model`：指定 DeepSeek 模型（默认 `deepseek-chat`）
+- `--temperature`：生成温度（默认 `0.2`）
+- `--max-tokens`：最大输出 token 数（默认 `4096`）
+- `--print-json`：打印提取出的 JSON 到标准输出
+
+## 文件说明
 
 - `model_output.md`：模型完整输出
-- `test_cases.json`：提取出的 JSON 结果
-- `manifest.json`：本次运行的元数据
+- `test_cases.json`：提取出的 JSON 结果，格式与 `cpp_project/test_cases.json` 一致
+- `manifest.json`：本次运行的元数据（包含 `test_type` 字段标识黑盒或白盒）
 - `last_llm_raw_response.txt`：本次运行的 API 原始响应

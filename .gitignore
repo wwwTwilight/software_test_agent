@@ -2,4 +2,5 @@
 .vscode
 .venv
 __pycache__
-analysis_agent/generated
+generated
+checkout_engine_test_autobuild

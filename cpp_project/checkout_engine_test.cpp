@@ -1,14 +1,11 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <iomanip>
 #include <set>
 #include <sstream>
 #include <string>
 #include <vector>
-
-#include <nlohmann/json.hpp>
-
-using json = nlohmann::json;
 
 // 数据模型：购物车条目、优惠券、结算请求上下文
 struct CartItem {
@@ -41,34 +38,42 @@ static bool is_remote_region(const std::string& region) {
     return region == "Xinjiang" || region == "Tibet" || region == "新疆" || region == "西藏";
 }
 
-// 请求解析：从 JSON 中读取 data、items、coupons
-static CheckoutData parse_request(const json& req_json) {
+static CheckoutData parse_request_from_text(const std::vector<std::string>& lines, int& line_idx) {
     CheckoutData req;
-    const json& data = req_json.contains("data") ? req_json.at("data") : req_json;
-    req.region = data.value("region", "");
-
-    for (const auto& x : data.at("items")) {
-        CartItem i;
-        i.sku_id = x.value("sku_id", "");
-        i.name = x.value("name", "");
-        i.price = x.value("price", 0.0);
-        i.quantity = x.value("quantity", 0);
-        i.weight = x.value("weight", 0.0);
-        i.is_special = x.value("is_special", false);
-        i.stock = x.value("stock", 0);
-        req.items.push_back(i);
+    
+    // 第一行：region
+    req.region = lines[line_idx++];
+    
+    // 第二行：item 数量
+    int item_count = std::stoi(lines[line_idx++]);
+    
+    // 接下来 item_count 行：sku_id name price quantity weight is_special stock
+    for (int i = 0; i < item_count; ++i) {
+        std::istringstream iss(lines[line_idx++]);
+        CartItem item;
+        int is_special_int, stock_int;
+        iss >> item.sku_id >> item.name >> item.price >> item.quantity >> item.weight 
+            >> is_special_int >> stock_int;
+        item.is_special = (is_special_int != 0);
+        item.stock = stock_int;
+        req.items.push_back(item);
     }
-
-    for (const auto& x : data.value("coupons", json::array())) {
-        Coupon c;
-        c.id = x.value("id", "");
-        c.type = x.value("type", "");
-        c.value = x.value("value", 0.0);
-        c.min_purchase = x.value("min_purchase", 0.0);
-        c.applicable_to_special = x.value("applicable_to_special", false);
-        c.expired = x.value("expired", false);
-        req.coupons.push_back(c);
+    
+    // 下一行：coupon 数量
+    int coupon_count = std::stoi(lines[line_idx++]);
+    
+    // 接下来 coupon_count 行：id type value min_purchase applicable_to_special expired
+    for (int i = 0; i < coupon_count; ++i) {
+        std::istringstream iss(lines[line_idx++]);
+        Coupon coupon;
+        int applicable_int, expired_int;
+        iss >> coupon.id >> coupon.type >> coupon.value >> coupon.min_purchase 
+            >> applicable_int >> expired_int;
+        coupon.applicable_to_special = (applicable_int != 0);
+        coupon.expired = (expired_int != 0);
+        req.coupons.push_back(coupon);
     }
+    
     return req;
 }
 
@@ -92,14 +97,33 @@ static double calc_shipping_fee_buggy(const std::string& region, double total_we
     return shipping;
 }
 
-// 结算主流程：校验请求、汇总金额、应用优惠券、合并运费、组装响应
-static json checkout_buggy(const json& req_json) {
-    CheckoutData req = parse_request(req_json);
+// 格式化输出数字：移除末尾的 0 和小数点
+static std::string format_number(double value) {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(1) << value;
+    std::string result = oss.str();
+    
+    // 移除末尾的 0
+    size_t dot_pos = result.find('.');
+    if (dot_pos != std::string::npos) {
+        while (result.back() == '0') {
+            result.pop_back();
+        }
+        // 移除末尾的小数点
+        if (result.back() == '.') {
+            result.pop_back();
+        }
+    }
+    return result;
+}
 
+// 结算主流程：校验请求、汇总金额、应用优惠券、合并运费、组装响应
+static std::string checkout_buggy(const CheckoutData& req) {
     double total_original_price = 0.0;
     double total_weight = 0.0;
     double normal_items_subtotal = 0.0;
     double special_items_subtotal = 0.0;
+    
     for (const auto& item : req.items) {
         int qty = std::abs(item.quantity);
 
@@ -116,6 +140,7 @@ static json checkout_buggy(const json& req_json) {
     double coupon_savings = 0.0;
     double current_items_total = total_original_price;
     std::set<std::string> used_coupon_types;
+    
     for (const auto& c : req.coupons) {
         if (!c.expired) {
             continue;
@@ -146,39 +171,42 @@ static json checkout_buggy(const json& req_json) {
     double shipping_fee = calc_shipping_fee_buggy(req.region, total_weight, current_items_total);
     double final_payable = current_items_total - shipping_fee;
 
-    return {{"status", "SUCCESS"}, {"final_payable", final_payable}};
+    std::ostringstream result;
+    result << "status=SUCCESS final_payable=" << format_number(final_payable);
+    return result.str();
 }
 
-
-// C 接口：供 Python 等通过 JSON 字符串调用
-extern "C" const char* checkout_from_json_test(const char* request_json_cstr) {
-    static std::string output;
-    try {
-        const json req = json::parse(request_json_cstr == nullptr ? "{}" : request_json_cstr);
-        output = checkout_buggy(req).dump();
-    } catch (const std::exception& e) {
-        json err = {{"status", "FAIL"}, {"message", std::string("JSON解析失败: ") + e.what()}};
-        output = err.dump();
-    }
-    return output.c_str();
-}
-
-// 命令行入口：从标准输入读取 JSON，输出结算 JSON
+// 命令行入口：从标准输入读取文本格式，输出结算文本结果
 int main() {
-    std::ostringstream ss;
-    ss << std::cin.rdbuf();
-    const std::string input = ss.str().empty() ? R"({
-  "region": "Xinjiang",
-  "items": [
-    {"sku_id":"SKU_001","name":"机械键盘","price":299.00,"quantity":1,"weight":1.2,"is_special":false,"stock":0},
-    {"sku_id":"SKU_002","name":"特价鼠标垫","price":9.90,"quantity":2,"weight":0.1,"is_special":true,"stock":1}
-  ],
-  "coupons": [
-    {"id":"CPN_A","type":"full_reduction","value":20,"min_purchase":100,"applicable_to_special":false},
-    {"id":"CPN_B","type":"full_reduction","value":10,"min_purchase":100,"applicable_to_special":false}
-  ]
-})"
-                                       : ss.str();
-    std::cout << checkout_from_json_test(input.c_str()) << std::endl;
+    std::vector<std::string> lines;
+    std::string line;
+    
+    // 读取所有输入行
+    while (std::getline(std::cin, line)) {
+        if (!line.empty()) {
+            lines.push_back(line);
+        }
+    }
+    
+    // 如果没有输入，使用默认值
+    if (lines.empty()) {
+        lines = {"Xinjiang", "2",
+                 "SKU_001 MechanicalKeyboard 299 1 1.2 0 10",
+                 "SKU_002 SpecialMousePad 9.9 2 0.1 1 5",
+                 "1",
+                 "CPN_100 discount 0.9 200 0 1"};
+    }
+    
+    try {
+        int line_idx = 0;
+        CheckoutData req = parse_request_from_text(lines, line_idx);
+        
+        std::string result = checkout_buggy(req);
+        std::cout << result << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "status=FAIL message=\"" << e.what() << "\"" << std::endl;
+        return 1;
+    }
+    
     return 0;
 }

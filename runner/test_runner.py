@@ -5,6 +5,7 @@ import sys
 import tempfile
 import re
 import argparse
+import shutil
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
@@ -262,11 +263,12 @@ class TestRunner:
         :param program_path: 被测程序路径
         :param testcases_path: 测试用例JSON文件路径
         """
-        self.program_path = program_path
+        self.program_path = Path(program_path)
         self.testcases_path = Path(testcases_path)
         self.executor = None
         self.test_cases = []
         self.results = []
+        self.compiled_program_path: Optional[Path] = None
         
         # 验证测试用例文件
         if not self.testcases_path.exists():
@@ -298,15 +300,63 @@ class TestRunner:
             raise ValueError("测试用例文件不包含 'test_case' 数组或数组为空")
         
         print(f"成功加载 {len(self.test_cases)} 个测试用例")
+
+    def _prepare_program(self) -> Path:
+        """准备被测程序：如果传入 C/C++ 源文件则先自动编译。"""
+        source_path = self.program_path
+        source_suffix = source_path.suffix.lower()
+        cpp_suffixes = {'.cpp', '.cc', '.cxx', '.c'}
+
+        if source_suffix not in cpp_suffixes:
+            return source_path
+
+        compiler_candidates = []
+        cxx_env = os.environ.get('CXX')
+        if cxx_env:
+            compiler_candidates.append(cxx_env)
+        compiler_candidates.extend(['g++', 'clang++'])
+
+        compiler = None
+        for candidate in compiler_candidates:
+            if shutil.which(candidate):
+                compiler = candidate
+                break
+
+        if compiler is None:
+            raise RuntimeError('未找到可用 C/C++ 编译器，请安装 g++ 或 clang++，或设置环境变量 CXX。')
+
+        exe_name = source_path.stem + ('_autobuild.exe' if os.name == 'nt' else '_autobuild')
+        output_path = source_path.parent / exe_name
+
+        compile_cmd = [
+            compiler,
+            '-std=c++17',
+            '-O2',
+            '-o',
+            str(output_path),
+            str(source_path),
+        ]
+
+        print(f'检测到源码输入，开始自动编译: {source_path}')
+        result = subprocess.run(compile_cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            err_text = (result.stderr or result.stdout or '未知编译错误').strip()
+            raise RuntimeError(f'自动编译失败: {err_text}')
+
+        self.compiled_program_path = output_path
+        print(f'自动编译成功: {output_path}')
+        return output_path
     
     def run(self) -> Dict:
         """运行所有测试"""
-        # 初始化执行器
-        self.executor = TestExecutor(self.program_path)
+        # 初始化执行器（如传入源码则先自动编译）
+        executable_path = self._prepare_program()
+        self.executor = TestExecutor(str(executable_path))
         
         print(f"\n{'='*70}")
         print(f"自动化测试执行器")
-        print(f"被测程序: {self.program_path}")
+        print(f"被测程序输入: {self.program_path}")
+        print(f"实际执行文件: {self.executor.program_path}")
         print(f"测试用例: {self.testcases_path}")
         print(f"用例数量: {len(self.test_cases)}")
         print(f"{'='*70}\n")
@@ -389,6 +439,7 @@ class TestRunner:
         summary = {
             'test_info': {
                 'program_path': str(self.program_path),
+                'executable_path': str(self.executor.program_path) if self.executor else str(self.program_path),
                 'testcases_path': str(self.testcases_path),
                 'execution_time': datetime.now().isoformat()
             },

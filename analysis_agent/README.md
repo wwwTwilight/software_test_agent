@@ -34,7 +34,7 @@ python analysis_agent/generate_test_cases.py \
   --spec cpp_project/电商购物车结算系统.md \
   --tests cpp_project/test_cases.json \
   --code cpp_project/checkout_engine_test.cpp \
-  --output-dir analysis_agent/generated
+  --output-dir generated
 ```
 
 ## 输出
@@ -44,7 +44,7 @@ python analysis_agent/generate_test_cases.py \
 批次文件夹结构示例：
 
 ```
-analysis_agent/generated/batch_20260417_153000/
+generated/batch_20260417_153000/
 ├── blackbox/
 │   ├── model_output.md
 │   ├── test_cases.json
@@ -64,7 +64,7 @@ analysis_agent/generated/batch_20260417_153000/
 - `--mode all`（默认）：同时调用两次 API，分别生成黑盒和白盒测试用例
 - `--mode blackbox`：仅生成黑盒测试用例（仅输入规格说明书）
 - `--mode whitebox`：仅生成白盒测试用例（输入规格说明书和代码）
-- `--output-dir`：指定输出根目录（默认 `analysis_agent/generated`）
+- `--output-dir`：指定输出根目录（默认 `generated`（项目根目录下））
 - `--model`：指定 DeepSeek 模型（默认 `deepseek-chat`）
 - `--temperature`：生成温度（默认 `0.2`）
 - `--max-tokens`：最大输出 token 数（默认 `4096`）

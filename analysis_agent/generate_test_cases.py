@@ -12,7 +12,7 @@ from typing import Any, Iterable
 from urllib import error, request
 
 
-DEFAULT_MODEL = "deepseek-chat"
+DEFAULT_MODEL = "deepseek-reasoner"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 JSON_START_MARKER = "<<<json_start>>>"
 JSON_END_MARKER = "<<<json_end>>>"
@@ -104,23 +104,58 @@ def build_prompt(inputs: InputBundle, test_type: str = "all") -> str:
     }.get(test_type, "测试用例")
     
     json_template = """{
-    "test_case": [
-        {
-            "id": "001",
-            "input": "Xinjiang\\n2\\nSKU_001 MechanicalKeyboard 299 1 1.2 0 10\\nSKU_002 SpecialMousePad 9.9 2 0.1 1 5\\n1\\nCPN_100 discount 0.9 200 0 1\\n",
-            "output": "status=SUCCESS final_payable=318.8"
-        },
-        {
-            "id": "002",
-            "input": "Beijing\\n1\\nSKU_001 MechanicalKeyboard 299 1 1.2 0 0\\n0\\n",
-            "output": "status=SUCCESS final_payable=299"
-        },
-        {
-            "id": "003",
-            "input": "Beijing\\n1\\nSKU_010 Cable 20 1 0.2 0 100\\n0\\n",
-            "output": "status=SUCCESS final_payable=14"
-        }
-    ]
+  "test_case": [
+    {
+      "id": "001",
+      "input": "Xinjiang\n2\nSKU_001 MechanicalKeyboard 299 1 1.2 0 10\nSKU_002 SpecialMousePad 9.9 2 0.1 1 5\n1\nCPN_100 discount 0.9 200 0 1\n",
+      "output": "status=SUCCESS final_payable=343.8"
+    },
+    {
+      "id": "002",
+      "input": "Beijing\n1\nSKU_001 MechanicalKeyboard 299 1 1.2 0 0\n0\n",
+      "output": "status=FAIL message=\"商品 SKU_001 库存不足，当前库存: 0, 需求: 1\""
+    },
+    {
+      "id": "003",
+      "input": "Beijing\n1\nSKU_010 Cable 20 1 0.2 0 100\n0\n",
+      "output": "status=SUCCESS final_payable=26.0"
+    },
+    {
+      "id": "004",
+      "input": "Beijing\n1\nSKU_011 Speaker 50 2 1.1 0 8\n0\n",
+      "output": "status=SUCCESS final_payable=100.0"
+    },
+    {
+      "id": "005",
+      "input": "Xinjiang\n1\nSKU_012 Chair 90 1 2.4 0 6\n0\n",
+      "output": "status=SUCCESS final_payable=125.0"
+    },
+    {
+      "id": "006",
+      "input": "Beijing\n1\nSKU_013 Lamp 80 1 0.5 0 9\n1\nCPN_201 full_reduction 10 100 0 1\n",
+      "output": "status=SUCCESS final_payable=86.0"
+    },
+    {
+      "id": "007",
+      "input": "Beijing\n1\nSKU_014 Book 80 1 0.5 0 9\n1\nCPN_202 full_reduction 10 100 0 0\n",
+      "output": "status=SUCCESS final_payable=86.0"
+    },
+    {
+      "id": "008",
+      "input": "Beijing\n1\nSKU_015 Pen 30 -2 0.3 0 50\n0\n",
+      "output": "status=FAIL message=\"商品数量必须大于0\""
+    },
+    {
+      "id": "009",
+      "input": "Beijing\n1\nSKU_016 Notebook 50 1 0.4 0 30\n2\nCPN_301 full_reduction 20 100 0 1\nCPN_302 full_reduction 10 100 0 1\n",
+      "output": "status=SUCCESS final_payable=56.0"
+    },
+    {
+      "id": "010",
+      "input": "Xinjiang\n1\nSKU_017 Sticker 5 1 3.2 1 999\n0\n",
+      "output": "status=SUCCESS final_payable=50.0"
+    }
+  ]
 }"""
 
     prompt_parts = [
@@ -140,7 +175,7 @@ def build_prompt(inputs: InputBundle, test_type: str = "all") -> str:
         "",
         "生成规则：",
         "- 顶层只能有 test_case。",
-        "- test_case 是数组，至少 8 条。",
+        "- test_case 是数组，至少 20 条。",
         "- 每条用例只允许 id、input、output 三个字段。",
         "- id 必须是三位数字字符串，从 001 开始递增。这是新生成用例集合的独立编号，不要基于已有测试用例的ID继续编号。",
         "- input 必须是可直接喂给程序的原始输入，保留换行。",
@@ -365,7 +400,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="待测代码路径，可传多个文件。默认读取 cpp_project 下的 C++ 文件。",
     )
-    parser.add_argument("--output-dir", type=Path, default=None, help="输出目录，默认 analysis_agent/generated。")
+    parser.add_argument("--output-dir", type=Path, default=None, help="输出目录，默认 generated（项目根目录下）。")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="DeepSeek 模型名。")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="DeepSeek API 基础地址。")
     parser.add_argument("--temperature", type=float, default=0.2, help="生成温度。")
@@ -400,7 +435,7 @@ def main() -> int:
     script_path = Path(__file__).resolve()
     script_dir = script_path.parent
     workspace_root = args.workspace_root or get_workspace_root(script_path)
-    output_dir = ensure_output_dir(args.output_dir or (script_dir / "generated"))
+    output_dir = ensure_output_dir(args.output_dir or (workspace_root / "generated"))
 
     spec_path, tests_path, code_paths = resolve_default_paths(workspace_root, args.spec, args.tests, args.code)
 

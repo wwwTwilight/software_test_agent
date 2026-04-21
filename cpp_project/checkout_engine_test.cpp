@@ -2,8 +2,13 @@
 #include <cmath>
 #include <iostream>
 #include <set>
+#include <sstream>
 #include <string>
 #include <vector>
+
+#include <nlohmann/json.hpp>
+
+using json = nlohmann::json;
 
 // 数据模型：购物车条目、优惠券、结算请求上下文
 struct CartItem {
@@ -31,14 +36,40 @@ struct CheckoutData {
     std::vector<Coupon> coupons;
 };
 
-struct CheckoutResult {
-    std::string status;
-    double final_payable = 0.0;
-};
-
 // 地区判断：是否为偏远地区（新疆、西藏等）
 static bool is_remote_region(const std::string& region) {
     return region == "Xinjiang" || region == "Tibet" || region == "新疆" || region == "西藏";
+}
+
+// 请求解析：从 JSON 中读取 data、items、coupons
+static CheckoutData parse_request(const json& req_json) {
+    CheckoutData req;
+    const json& data = req_json.contains("data") ? req_json.at("data") : req_json;
+    req.region = data.value("region", "");
+
+    for (const auto& x : data.at("items")) {
+        CartItem i;
+        i.sku_id = x.value("sku_id", "");
+        i.name = x.value("name", "");
+        i.price = x.value("price", 0.0);
+        i.quantity = x.value("quantity", 0);
+        i.weight = x.value("weight", 0.0);
+        i.is_special = x.value("is_special", false);
+        i.stock = x.value("stock", 0);
+        req.items.push_back(i);
+    }
+
+    for (const auto& x : data.value("coupons", json::array())) {
+        Coupon c;
+        c.id = x.value("id", "");
+        c.type = x.value("type", "");
+        c.value = x.value("value", 0.0);
+        c.min_purchase = x.value("min_purchase", 0.0);
+        c.applicable_to_special = x.value("applicable_to_special", false);
+        c.expired = x.value("expired", false);
+        req.coupons.push_back(c);
+    }
+    return req;
 }
 
 // 运费计算：按地区与重量估算运费，并结合优惠后金额判断是否包邮
@@ -61,8 +92,9 @@ static double calc_shipping_fee_buggy(const std::string& region, double total_we
     return shipping;
 }
 
-// 结算主流程：汇总金额、应用优惠券、合并运费、组装响应
-static CheckoutResult checkout_buggy(const CheckoutData& req) {
+// 结算主流程：校验请求、汇总金额、应用优惠券、合并运费、组装响应
+static json checkout_buggy(const json& req_json) {
+    CheckoutData req = parse_request(req_json);
 
     double total_original_price = 0.0;
     double total_weight = 0.0;
@@ -114,10 +146,24 @@ static CheckoutResult checkout_buggy(const CheckoutData& req) {
     double shipping_fee = calc_shipping_fee_buggy(req.region, total_weight, current_items_total);
     double final_payable = current_items_total - shipping_fee;
 
-    return {"SUCCESS", final_payable};
+    return {{"status", "SUCCESS"}, {"final_payable", final_payable}};
 }
 
-// 命令行入口：直接从标准输入读取字段
+
+// C 接口：供 Python 等通过 JSON 字符串调用
+extern "C" const char* checkout_from_json_test(const char* request_json_cstr) {
+    static std::string output;
+    try {
+        const json req = json::parse(request_json_cstr == nullptr ? "{}" : request_json_cstr);
+        output = checkout_buggy(req).dump();
+    } catch (const std::exception& e) {
+        json err = {{"status", "FAIL"}, {"message", std::string("JSON解析失败: ") + e.what()}};
+        output = err.dump();
+    }
+    return output.c_str();
+}
+
+// 命令行入口：从标准输入读取文本格式，输出文本格式
 int main() {
     // 输入格式：
     // region
@@ -151,7 +197,36 @@ int main() {
         req.coupons.push_back(coupon);
     }
 
-    const CheckoutResult result = checkout_buggy(req);
-    std::cout << "status=" << result.status << " final_payable=" << result.final_payable << std::endl;
+    // 构建JSON对象进行调用
+    json req_json;
+    req_json["region"] = req.region;
+    json items_json = json::array();
+    for (const auto& item : req.items) {
+        json item_json;
+        item_json["sku_id"] = item.sku_id;
+        item_json["name"] = item.name;
+        item_json["price"] = item.price;
+        item_json["quantity"] = item.quantity;
+        item_json["weight"] = item.weight;
+        item_json["is_special"] = item.is_special;
+        item_json["stock"] = item.stock;
+        items_json.push_back(item_json);
+    }
+    req_json["items"] = items_json;
+    json coupons_json = json::array();
+    for (const auto& coupon : req.coupons) {
+        json coupon_json;
+        coupon_json["id"] = coupon.id;
+        coupon_json["type"] = coupon.type;
+        coupon_json["value"] = coupon.value;
+        coupon_json["min_purchase"] = coupon.min_purchase;
+        coupon_json["applicable_to_special"] = coupon.applicable_to_special;
+        coupon_json["expired"] = coupon.expired;
+        coupons_json.push_back(coupon_json);
+    }
+    req_json["coupons"] = coupons_json;
+
+    json result = checkout_buggy(req_json);
+    std::cout << "status=" << result["status"] << " final_payable=" << result["final_payable"] << std::endl;
     return 0;
 }

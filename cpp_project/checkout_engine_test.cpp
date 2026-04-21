@@ -2,8 +2,13 @@
 #include <cmath>
 #include <iostream>
 #include <set>
+#include <sstream>
 #include <string>
 #include <vector>
+
+#include <nlohmann/json.hpp>
+
+using json = nlohmann::json;
 
 // 数据模型：购物车条目、优惠券、结算请求上下文
 struct CartItem {
@@ -31,14 +36,40 @@ struct CheckoutData {
     std::vector<Coupon> coupons;
 };
 
-struct CheckoutResult {
-    std::string status;
-    double final_payable = 0.0;
-};
-
 // 地区判断：是否为偏远地区（新疆、西藏等）
 static bool is_remote_region(const std::string& region) {
     return region == "Xinjiang" || region == "Tibet" || region == "新疆" || region == "西藏";
+}
+
+// 请求解析：从 JSON 中读取 data、items、coupons
+static CheckoutData parse_request(const json& req_json) {
+    CheckoutData req;
+    const json& data = req_json.contains("data") ? req_json.at("data") : req_json;
+    req.region = data.value("region", "");
+
+    for (const auto& x : data.at("items")) {
+        CartItem i;
+        i.sku_id = x.value("sku_id", "");
+        i.name = x.value("name", "");
+        i.price = x.value("price", 0.0);
+        i.quantity = x.value("quantity", 0);
+        i.weight = x.value("weight", 0.0);
+        i.is_special = x.value("is_special", false);
+        i.stock = x.value("stock", 0);
+        req.items.push_back(i);
+    }
+
+    for (const auto& x : data.value("coupons", json::array())) {
+        Coupon c;
+        c.id = x.value("id", "");
+        c.type = x.value("type", "");
+        c.value = x.value("value", 0.0);
+        c.min_purchase = x.value("min_purchase", 0.0);
+        c.applicable_to_special = x.value("applicable_to_special", false);
+        c.expired = x.value("expired", false);
+        req.coupons.push_back(c);
+    }
+    return req;
 }
 
 // 运费计算：按地区与重量估算运费，并结合优惠后金额判断是否包邮
@@ -61,8 +92,9 @@ static double calc_shipping_fee_buggy(const std::string& region, double total_we
     return shipping;
 }
 
-// 结算主流程：汇总金额、应用优惠券、合并运费、组装响应
-static CheckoutResult checkout_buggy(const CheckoutData& req) {
+// 结算主流程：校验请求、汇总金额、应用优惠券、合并运费、组装响应
+static json checkout_buggy(const json& req_json) {
+    CheckoutData req = parse_request(req_json);
 
     double total_original_price = 0.0;
     double total_weight = 0.0;
@@ -114,44 +146,39 @@ static CheckoutResult checkout_buggy(const CheckoutData& req) {
     double shipping_fee = calc_shipping_fee_buggy(req.region, total_weight, current_items_total);
     double final_payable = current_items_total - shipping_fee;
 
-    return {"SUCCESS", final_payable};
+    return {{"status", "SUCCESS"}, {"final_payable", final_payable}};
 }
 
-// 命令行入口：直接从标准输入读取字段
+
+// C 接口：供 Python 等通过 JSON 字符串调用
+extern "C" const char* checkout_from_json_test(const char* request_json_cstr) {
+    static std::string output;
+    try {
+        const json req = json::parse(request_json_cstr == nullptr ? "{}" : request_json_cstr);
+        output = checkout_buggy(req).dump();
+    } catch (const std::exception& e) {
+        json err = {{"status", "FAIL"}, {"message", std::string("JSON解析失败: ") + e.what()}};
+        output = err.dump();
+    }
+    return output.c_str();
+}
+
+// 命令行入口：从标准输入读取 JSON，输出结算 JSON
 int main() {
-    // 输入格式：
-    // region
-    // item_count
-    // sku_id name price quantity weight is_special stock  (重复 item_count 行)
-    // coupon_count
-    // id type value min_purchase applicable_to_special expired (重复 coupon_count 行)
-    CheckoutData req;
-    int item_count = 0;
-    int coupon_count = 0;
-
-    if (!(std::cin >> req.region >> item_count)) {
-        return 0;
-    }
-
-    req.items.reserve(std::max(0, item_count));
-    for (int i = 0; i < item_count; ++i) {
-        CartItem item;
-        std::cin >> item.sku_id >> item.name >> item.price >> item.quantity >> item.weight >> item.is_special >> item.stock;
-        req.items.push_back(item);
-    }
-
-    if (!(std::cin >> coupon_count)) {
-        coupon_count = 0;
-    }
-
-    req.coupons.reserve(std::max(0, coupon_count));
-    for (int i = 0; i < coupon_count; ++i) {
-        Coupon coupon;
-        std::cin >> coupon.id >> coupon.type >> coupon.value >> coupon.min_purchase >> coupon.applicable_to_special >> coupon.expired;
-        req.coupons.push_back(coupon);
-    }
-
-    const CheckoutResult result = checkout_buggy(req);
-    std::cout << "status=" << result.status << " final_payable=" << result.final_payable << std::endl;
+    std::ostringstream ss;
+    ss << std::cin.rdbuf();
+    const std::string input = ss.str().empty() ? R"({
+  "region": "Xinjiang",
+  "items": [
+    {"sku_id":"SKU_001","name":"机械键盘","price":299.00,"quantity":1,"weight":1.2,"is_special":false,"stock":0},
+    {"sku_id":"SKU_002","name":"特价鼠标垫","price":9.90,"quantity":2,"weight":0.1,"is_special":true,"stock":1}
+  ],
+  "coupons": [
+    {"id":"CPN_A","type":"full_reduction","value":20,"min_purchase":100,"applicable_to_special":false},
+    {"id":"CPN_B","type":"full_reduction","value":10,"min_purchase":100,"applicable_to_special":false}
+  ]
+})"
+                                       : ss.str();
+    std::cout << checkout_from_json_test(input.c_str()) << std::endl;
     return 0;
 }

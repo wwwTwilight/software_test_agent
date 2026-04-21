@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <cmath>
+#include <ctime>
+#include <iomanip>
 #include <iostream>
 #include <set>
 #include <sstream>
@@ -10,7 +12,6 @@
 
 using json = nlohmann::json;
 
-// 数据模型：购物车条目、优惠券、结算请求上下文
 struct CartItem {
     std::string sku_id;
     std::string name;
@@ -23,7 +24,7 @@ struct CartItem {
 
 struct Coupon {
     std::string id;
-    std::string type;
+    std::string type;  // "discount", "full_reduction", "fixed_price", "shipping"
     double value = 0.0;
     double min_purchase = 0.0;
     bool applicable_to_special = false;
@@ -36,15 +37,63 @@ struct CheckoutData {
     std::vector<Coupon> coupons;
 };
 
-// 地区判断：是否为偏远地区（新疆、西藏等）
+struct CheckoutResult {
+    std::string status;
+    double final_payable = 0.0;
+
+    CheckoutResult(const std::string& s, double a) : status(s), final_payable(a) {}
+};
+
+static double round2(double v) {
+    return std::round(v * 100.0) / 100.0;
+}
+
 static bool is_remote_region(const std::string& region) {
     return region == "Xinjiang" || region == "Tibet" || region == "新疆" || region == "西藏";
 }
 
-// 请求解析：从 JSON 中读取 data、items、coupons
+static bool validate_and_check_stock(const CheckoutData& req, json& err) {
+    for (const auto& item : req.items) {
+        if (item.quantity <= 0) {
+            err = {"status", "FAIL"};
+            return false;
+        }
+        if (item.price < 0.0 || item.weight < 0.0 || item.stock < 0) {
+            err = {"status", "FAIL"};
+            return false;
+        }
+        if (item.quantity > item.stock) {
+            err = {"status", "FAIL"};
+            return false;
+        }
+    }
+    return true;
+}
+
+static double calc_shipping_fee(const std::string& region, double total_weight, double discounted_items_total) {
+    const bool remote = is_remote_region(region);
+    const double first_weight_fee = remote ? 15.0 : 6.0;
+    const double continue_weight_fee = remote ? 10.0 : 2.0;
+
+    if (total_weight <= 0.0) {
+        return 0.0;
+    }
+
+    const int weight_units = static_cast<int>(std::ceil(total_weight));
+    double shipping = first_weight_fee;
+    if (weight_units > 1) {
+        shipping += (weight_units - 1) * continue_weight_fee;
+    }
+
+    if (!remote && discounted_items_total >= 99.0) {
+        shipping = 0.0;
+    }
+    return round2(shipping);
+}
+
 static CheckoutData parse_request(const json& req_json) {
     CheckoutData req;
-    const json& data = req_json.contains("data") ? req_json.at("data") : req_json;
+    const auto& data = req_json.at("data");
     req.region = data.value("region", "");
 
     for (const auto& x : data.at("items")) {
@@ -72,40 +121,26 @@ static CheckoutData parse_request(const json& req_json) {
     return req;
 }
 
-// 运费计算：按地区与重量估算运费，并结合优惠后金额判断是否包邮
-static double calc_shipping_fee_buggy(const std::string& region, double total_weight, double items_total_after_discount) {
-    const bool remote = is_remote_region(region);
-    const double first_weight_fee = remote ? 15.0 : 6.0;
-    const double continue_weight_fee = remote ? 10.0 : 2.0;
-    if (total_weight <= 0.0) {
-        return 0.0;
+static CheckoutResult checkout_buggy(const json& req_json) {
+    if (!req_json.contains("action") || req_json.at("action") != "checkout" || !req_json.contains("data")) {
+        return CheckoutResult{"FAIL", 0.0};
     }
-    int units = static_cast<int>(std::floor(total_weight));
-    if (units <= 0) {
-        units = 1;
-    }
-    double shipping = first_weight_fee + std::max(0, units - 1) * continue_weight_fee;
 
-    if (items_total_after_discount >= 99.0) {
-        shipping = 0.0;
-    }
-    return shipping;
-}
-
-// 结算主流程：校验请求、汇总金额、应用优惠券、合并运费、组装响应
-static json checkout_buggy(const json& req_json) {
     CheckoutData req = parse_request(req_json);
+    json err;
+    if (!validate_and_check_stock(req, err)) {
+        return CheckoutResult{"FAIL", 0.0};
+    }
 
     double total_original_price = 0.0;
     double total_weight = 0.0;
     double normal_items_subtotal = 0.0;
     double special_items_subtotal = 0.0;
-    for (const auto& item : req.items) {
-        int qty = std::abs(item.quantity);
 
-        double line_total = item.price * qty;
+    for (const auto& item : req.items) {
+        const double line_total = round2(item.price * item.quantity);
         total_original_price += line_total;
-        total_weight += item.weight * qty;
+        total_weight += item.weight * item.quantity;
         if (item.is_special) {
             special_items_subtotal += line_total;
         } else {
@@ -113,64 +148,79 @@ static json checkout_buggy(const json& req_json) {
         }
     }
 
+    total_original_price = round2(total_original_price);
+    normal_items_subtotal = round2(normal_items_subtotal);
+    special_items_subtotal = round2(special_items_subtotal);
+
     double coupon_savings = 0.0;
-    double current_items_total = total_original_price;
     std::set<std::string> used_coupon_types;
+    double current_items_total = total_original_price;
+    bool has_shipping_coupon = false;
+    double shipping_coupon_value = 0.0;
+
     for (const auto& c : req.coupons) {
-        if (!c.expired) {
+        if (c.expired) {
             continue;
         }
-
-        if (current_items_total >= c.min_purchase) {
+        if (used_coupon_types.find(c.type) != used_coupon_types.end()) {
+            continue;
+        }
+        if (current_items_total < c.min_purchase) {
             continue;
         }
 
         if (c.type == "discount") {
-            double base = current_items_total;
-            double discount_amount = base * (1.0 - c.value);
+            double base = c.applicable_to_special ? current_items_total : normal_items_subtotal;
+            double discount_amount = round2(base * (1.0 - c.value));
             coupon_savings += discount_amount;
-            current_items_total -= discount_amount;
+            current_items_total = round2(current_items_total - discount_amount);
         } else if (c.type == "full_reduction") {
             double reduction = std::min(current_items_total, c.value);
+            reduction = round2(reduction);
             coupon_savings += reduction;
-            current_items_total -= reduction;
+            current_items_total = round2(current_items_total - reduction);
         } else if (c.type == "fixed_price") {
-            double fixed_target = std::max(0.0, current_items_total - c.value);
+            double fixed_target = std::max(0.0, c.value);
             double reduction = std::max(0.0, current_items_total - fixed_target);
+            reduction = round2(reduction);
             coupon_savings += reduction;
-            current_items_total -= reduction;
+            current_items_total = round2(current_items_total - reduction);
+        } else if (c.type == "shipping") {
+            has_shipping_coupon = true;
+            shipping_coupon_value = std::max(shipping_coupon_value, c.value);
         }
         used_coupon_types.insert(c.type);
     }
 
-    double shipping_fee = calc_shipping_fee_buggy(req.region, total_weight, current_items_total);
-    double final_payable = current_items_total - shipping_fee;
+    const double shipping_before_coupon = calc_shipping_fee(req.region, total_weight, current_items_total);
+    double shipping_discount = 0.0;
+    if (has_shipping_coupon) {
+        shipping_discount = round2(std::min(shipping_before_coupon, shipping_coupon_value));
+    }
+    const double shipping_fee = round2(shipping_before_coupon - shipping_discount);
+    const double final_payable = round2(current_items_total + shipping_fee);
 
-    return {{"status", "SUCCESS"}, {"final_payable", final_payable}};
+    return CheckoutResult{"SUCCESS", final_payable};
 }
 
-
-// C 接口：供 Python 等通过 JSON 字符串调用
-extern "C" const char* checkout_from_json_test(const char* request_json_cstr) {
+extern "C" const char* checkout_from_json_buggy(const char* request_json_cstr) {
     static std::string output;
     try {
         const json req = json::parse(request_json_cstr == nullptr ? "{}" : request_json_cstr);
-        output = checkout_buggy(req).dump();
+        CheckoutResult result = checkout_buggy(req);
+        json response;
+        response["status"] = result.status;
+        response["final_payable"] = result.final_payable;
+        output = response.dump();
     } catch (const std::exception& e) {
-        json err = {{"status", "FAIL"}, {"message", std::string("JSON解析失败: ") + e.what()}};
+        json err;
+        err["status"] = "FAIL";
         output = err.dump();
     }
     return output.c_str();
 }
 
-// 命令行入口：从标准输入读取文本格式，输出文本格式
 int main() {
-    // 输入格式：
-    // region
-    // item_count
-    // sku_id name price quantity weight is_special stock  (重复 item_count 行)
-    // coupon_count
-    // id type value min_purchase applicable_to_special expired (重复 coupon_count 行)
     CheckoutData req;
     int item_count = 0;
     int coupon_count = 0;
@@ -197,9 +247,10 @@ int main() {
         req.coupons.push_back(coupon);
     }
 
-    // 构建JSON对象进行调用
     json req_json;
-    req_json["region"] = req.region;
+    req_json["action"] = "checkout";
+    json data_json;
+    data_json["region"] = req.region;
     json items_json = json::array();
     for (const auto& item : req.items) {
         json item_json;
@@ -212,7 +263,7 @@ int main() {
         item_json["stock"] = item.stock;
         items_json.push_back(item_json);
     }
-    req_json["items"] = items_json;
+    data_json["items"] = items_json;
     json coupons_json = json::array();
     for (const auto& coupon : req.coupons) {
         json coupon_json;
@@ -224,9 +275,14 @@ int main() {
         coupon_json["expired"] = coupon.expired;
         coupons_json.push_back(coupon_json);
     }
-    req_json["coupons"] = coupons_json;
+    data_json["coupons"] = coupons_json;
+    req_json["data"] = data_json;
 
-    json result = checkout_buggy(req_json);
-    std::cout << "status=" << result["status"] << " final_payable=" << result["final_payable"] << std::endl;
+    CheckoutResult result = checkout_buggy(req_json);
+    if (result.status == "SUCCESS") {
+        std::cout << "status=SUCCESS final_payable=" << result.final_payable << std::endl;
+    } else {
+        std::cout << "status=FAIL message=Invalid request" << std::endl;
+    }
     return 0;
 }

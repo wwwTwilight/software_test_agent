@@ -37,6 +37,13 @@ struct CheckoutData {
     std::vector<Coupon> coupons;
 };
 
+struct CheckoutResult {
+    std::string status;
+    double final_payable = 0.0;
+
+    CheckoutResult(const std::string& s, double a) : status(s), final_payable(a) {}
+};
+
 static double round2(double v) {
     return std::round(v * 100.0) / 100.0;
 }
@@ -119,15 +126,15 @@ static CheckoutData parse_request(const json& req_json) {
     return req;
 }
 
-static json checkout(const json& req_json) {
+static CheckoutResult checkout(const json& req_json) {
     if (!req_json.contains("action") || req_json.at("action") != "checkout" || !req_json.contains("data")) {
-        return {{"status", "FAIL"}, {"error_code", "E_INPUT_000"}, {"message", "无效请求格式"}};
+        return CheckoutResult{"FAIL", 0.0};
     }
 
     CheckoutData req = parse_request(req_json);
     json err;
     if (!validate_and_check_stock(req, err)) {
-        return err;
+        return CheckoutResult{"FAIL", 0.0};
     }
 
     double total_original_price = 0.0;
@@ -199,22 +206,8 @@ static json checkout(const json& req_json) {
     }
     const double shipping_fee = round2(shipping_before_coupon - shipping_discount);
     const double final_payable = round2(current_items_total + shipping_fee);
-    const double total_discount = round2(coupon_savings + shipping_discount);
 
-    return {
-        {"status", "SUCCESS"},
-        {"data",
-         {
-             {"total_original_price", total_original_price},
-             {"total_discount", total_discount},
-             {"shipping_fee", shipping_fee},
-             {"final_payable", final_payable},
-             {"breakdown",
-              {{"items_subtotal", total_original_price},
-               {"coupon_savings", round2(coupon_savings)},
-               {"shipping_discount", shipping_discount}}},
-             {"message", "结算成功"},
-         }}};
+    return CheckoutResult{"SUCCESS", final_payable};
 }
 
 // 预留 Python 交互入口:
@@ -225,7 +218,11 @@ extern "C" const char* checkout_from_json(const char* request_json_cstr) {
     static std::string output;
     try {
         const json req = json::parse(request_json_cstr == nullptr ? "{}" : request_json_cstr);
-        output = checkout(req).dump();
+        CheckoutResult result = checkout(req);
+        json response;
+        response["status"] = result.status;
+        response["final_payable"] = result.final_payable;
+        output = response.dump();
     } catch (const std::exception& e) {
         json err = {{"status", "FAIL"}, {"error_code", "E_JSON_001"}, {"message", std::string("JSON解析失败: ") + e.what()}};
         output = err.dump();
@@ -298,11 +295,11 @@ int main() {
     data_json["coupons"] = coupons_json;
     req_json["data"] = data_json;
 
-    json result = checkout(req_json);
-    if (result["status"] == "SUCCESS") {
-        std::cout << "status=SUCCESS final_payable=" << result["data"]["final_payable"] << std::endl;
+    CheckoutResult result = checkout(req_json);
+    if (result.status == "SUCCESS") {
+        std::cout << "status=SUCCESS final_payable=" << result.final_payable << std::endl;
     } else {
-        std::cout << "status=FAIL message=" << result["message"] << std::endl;
+        std::cout << "status=FAIL message=Invalid request" << std::endl;
     }
     return 0;
 }

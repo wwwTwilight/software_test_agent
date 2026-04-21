@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <cmath>
+#include <ctime>
+#include <iomanip>
 #include <iostream>
 #include <set>
 #include <sstream>
@@ -22,7 +24,7 @@ struct CartItem {
 
 struct Coupon {
     std::string id;
-    std::string type;
+    std::string type;  // "discount", "full_reduction", "fixed_price", "shipping"
     double value = 0.0;
     double min_purchase = 0.0;
     bool applicable_to_special = false;
@@ -35,8 +37,68 @@ struct CheckoutData {
     std::vector<Coupon> coupons;
 };
 
+struct CheckoutResult {
+    std::string status;
+    double final_payable = 0.0;
+
+    CheckoutResult(const std::string& s, double a) : status(s), final_payable(a) {}
+};
+
+static double round2(double v) {
+    return std::round(v * 100.0) / 100.0;
+}
+
 static bool is_remote_region(const std::string& region) {
     return region == "Xinjiang" || region == "Tibet" || region == "新疆" || region == "西藏";
+}
+
+static bool validate_and_check_stock(const CheckoutData& req, json& err) {
+    for (const auto& item : req.items) {
+        // BUG #1: 输入范围的bug - 移除非负检查
+        // 原逻辑：
+        // if (item.quantity <= 0) {
+        //     err = {{"status", "FAIL"}, {"error_code", "E_INPUT_001"}, {"message", "商品数量必须大于0"}};
+        //     return false;
+        // }
+        // if (item.price < 0.0 || item.weight < 0.0 || item.stock < 0) {
+        //     err = {{"status", "FAIL"}, {"error_code", "E_INPUT_002"}, {"message", "商品价格/重量/库存不能为负数"}};
+        //     return false;
+        // }
+        
+        // BUG #2: 不对stock字段的数值进行检查
+        // 原逻辑：
+        // if (item.quantity > item.stock) {
+        //     err = {
+        //         {"status", "FAIL"},
+        //         {"error_code", "E_STOCK_001"},
+        //         {"message", "商品 " + item.sku_id + " 库存不足，当前库存: " + std::to_string(item.stock) +
+        //                         ", 需求: " + std::to_string(item.quantity)}};
+        //     return false;
+        // }
+    }
+    return true;
+}
+
+static double calc_shipping_fee(const std::string& region, double total_weight, double discounted_items_total) {
+    const bool remote = is_remote_region(region);
+    const double first_weight_fee = remote ? 15.0 : 6.0;
+    const double continue_weight_fee = remote ? 10.0 : 2.0;
+
+    if (total_weight <= 0.0) {
+        return 0.0;
+    }
+
+    const int weight_units = static_cast<int>(std::ceil(total_weight));
+    double shipping = first_weight_fee;
+    if (weight_units > 1) {
+        shipping += (weight_units - 1) * continue_weight_fee;
+    }
+
+    // 普通地区满99包邮；偏远地区不包邮
+    if (!remote && discounted_items_total >= 99.0) {
+        shipping = 0.0;
+    }
+    return round2(shipping);
 }
 
 static CheckoutData parse_request(const json& req_json) {
@@ -69,50 +131,26 @@ static CheckoutData parse_request(const json& req_json) {
     return req;
 }
 
-static double calc_shipping_fee_buggy(const std::string& region, double total_weight, double items_total_after_discount) {
-    const bool remote = is_remote_region(region);
-    const double first_weight_fee = remote ? 15.0 : 6.0;
-    const double continue_weight_fee = remote ? 10.0 : 2.0;
-    if (total_weight <= 0.0) {
-        return 0.0;
-    }
-    // BUG #5: 续重计算错误，使用 floor 导致不足 1kg 不进位
-    // 正确应使用 ceil(total_weight)
-    int units = static_cast<int>(std::floor(total_weight));
-    if (units <= 0) {
-        units = 1;
-    }
-    double shipping = first_weight_fee + std::max(0, units - 1) * continue_weight_fee;
-
-    // BUG #3: 包邮规则错误，偏远地区也包邮（应当仅普通地区包邮）
-    if (items_total_after_discount >= 99.0) {
-        shipping = 0.0;
-    }
-    return shipping;
-}
-
-static json checkout_buggy(const json& req_json) {
+static CheckoutResult checkout_buggy(const json& req_json) {
     if (!req_json.contains("action") || req_json.at("action") != "checkout" || !req_json.contains("data")) {
-        return {{"status", "FAIL"}, {"error_code", "E_INPUT_000"}, {"message", "无效请求格式"}};
+        return CheckoutResult{"FAIL", 0.0};
     }
-    CheckoutData req = parse_request(req_json);
 
-    // BUG #4: 故意缺失库存校验，可能导致超卖
-    // 正确逻辑应在此处校验 item.quantity <= item.stock
+    CheckoutData req = parse_request(req_json);
+    json err;
+    if (!validate_and_check_stock(req, err)) {
+        return CheckoutResult{"FAIL", 0.0};
+    }
 
     double total_original_price = 0.0;
     double total_weight = 0.0;
     double normal_items_subtotal = 0.0;
     double special_items_subtotal = 0.0;
-    for (const auto& item : req.items) {
-        // BUG #6: 对负数数量未拦截，还取绝对值继续计算，掩盖输入异常
-        // 正确逻辑应直接返回输入错误
-        int qty = std::abs(item.quantity);
 
-        // BUG #1: 故意不做金额四舍五入，可能出现浮点误差
-        double line_total = item.price * qty;
+    for (const auto& item : req.items) {
+        const double line_total = round2(item.price * item.quantity);
         total_original_price += line_total;
-        total_weight += item.weight * qty;
+        total_weight += item.weight * item.quantity;
         if (item.is_special) {
             special_items_subtotal += line_total;
         } else {
@@ -120,68 +158,82 @@ static json checkout_buggy(const json& req_json) {
         }
     }
 
+    total_original_price = round2(total_original_price);
+    normal_items_subtotal = round2(normal_items_subtotal);
+    special_items_subtotal = round2(special_items_subtotal);
+
     double coupon_savings = 0.0;
-    double current_items_total = total_original_price;
     std::set<std::string> used_coupon_types;
+    double current_items_total = total_original_price;
+    bool has_shipping_coupon = false;
+    double shipping_coupon_value = 0.0;
+
     for (const auto& c : req.coupons) {
-        // BUG #7: 过期券处理反了，未过期券被跳过，过期券反而继续使用
-        if (!c.expired) {
+        // BUG #3: 不检查优惠券expired字段
+        // 原逻辑：
+        // if (c.expired) {
+        //     continue;
+        // }
+        
+        // BUG #4: 同类优惠券可叠加bug
+        // 原逻辑：
+        // if (used_coupon_types.find(c.type) != used_coupon_types.end()) {
+        //     continue;  // 同类券不可叠加
+        // }
+        
+        if (current_items_total < c.min_purchase) {
             continue;
         }
-
-        // BUG #8: 门槛判断错误，达到门槛反而跳过，没达到门槛继续使用
-        if (current_items_total >= c.min_purchase) {
-            continue;
-        }
-
-        // BUG #2: 故意允许同类优惠券叠加（应禁止）
-        // 正确逻辑应为:
-        // if (used_coupon_types.count(c.type)) continue;
 
         if (c.type == "discount") {
-            // BUG #9: 折扣基数错误，无视 applicable_to_special，总是全单打折
-            double base = current_items_total;
-            double discount_amount = base * (1.0 - c.value);
+            double base = c.applicable_to_special ? current_items_total : normal_items_subtotal;
+            double discount_amount = round2(base * (1.0 - c.value));
             coupon_savings += discount_amount;
-            current_items_total -= discount_amount;
+            current_items_total = round2(current_items_total - discount_amount);
         } else if (c.type == "full_reduction") {
+            // value 表示减免金额，如 20 元
             double reduction = std::min(current_items_total, c.value);
+            reduction = round2(reduction);
             coupon_savings += reduction;
-            current_items_total -= reduction;
+            current_items_total = round2(current_items_total - reduction);
         } else if (c.type == "fixed_price") {
-            // BUG #10: 一口价逻辑错误，把 value 当作“减免金额”而非“目标价”
-            // 这会导致 fixed_price 与 full_reduction 行为重复
-            double fixed_target = std::max(0.0, current_items_total - c.value);
+            // value 表示优惠后订单总价
+            double fixed_target = std::max(0.0, c.value);
             double reduction = std::max(0.0, current_items_total - fixed_target);
+            reduction = round2(reduction);
             coupon_savings += reduction;
-            current_items_total -= reduction;
+            current_items_total = round2(current_items_total - reduction);
+        } else if (c.type == "shipping") {
+            has_shipping_coupon = true;
+            shipping_coupon_value = std::max(shipping_coupon_value, c.value);
         }
         used_coupon_types.insert(c.type);
     }
 
-    double shipping_fee = calc_shipping_fee_buggy(req.region, total_weight, current_items_total);
-    // BUG #11: 最终金额计算符号错误，错误地减去运费
-    double final_payable = current_items_total - shipping_fee;
+    const double shipping_before_coupon = calc_shipping_fee(req.region, total_weight, current_items_total);
+    double shipping_discount = 0.0;
+    if (has_shipping_coupon) {
+        shipping_discount = round2(std::min(shipping_before_coupon, shipping_coupon_value));
+    }
+    const double shipping_fee = round2(shipping_before_coupon - shipping_discount);
+    const double final_payable = round2(current_items_total + shipping_fee);
 
-    return {{"status", "SUCCESS"},
-            {"data",
-             {{"total_original_price", total_original_price},
-              {"total_discount", coupon_savings},
-              {"shipping_fee", shipping_fee},
-              {"final_payable", final_payable},
-              {"breakdown",
-               {{"items_subtotal", total_original_price},
-                {"coupon_savings", coupon_savings},
-                {"shipping_discount", 0.0}}},
-              // BUG #12: 即使 final_payable 为负数，也不做下限保护
-              {"message", "结算成功"}}}};
+    return CheckoutResult{"SUCCESS", final_payable};
 }
 
+// 预留 Python 交互入口:
+// - 可被 ctypes/cffi 调用
+// - 输入: UTF-8 JSON 字符串
+// - 输出: UTF-8 JSON 字符串
 extern "C" const char* checkout_from_json_buggy(const char* request_json_cstr) {
     static std::string output;
     try {
         const json req = json::parse(request_json_cstr == nullptr ? "{}" : request_json_cstr);
-        output = checkout_buggy(req).dump();
+        CheckoutResult result = checkout_buggy(req);
+        json response;
+        response["status"] = result.status;
+        response["final_payable"] = result.final_payable;
+        output = response.dump();
     } catch (const std::exception& e) {
         json err = {{"status", "FAIL"}, {"error_code", "E_JSON_001"}, {"message", std::string("JSON解析失败: ") + e.what()}};
         output = err.dump();
@@ -254,11 +306,11 @@ int main() {
     data_json["coupons"] = coupons_json;
     req_json["data"] = data_json;
 
-    json result = checkout_buggy(req_json);
-    if (result["status"] == "SUCCESS") {
-        std::cout << "status=SUCCESS final_payable=" << result["data"]["final_payable"] << std::endl;
+    CheckoutResult result = checkout_buggy(req_json);
+    if (result.status == "SUCCESS") {
+        std::cout << "status=SUCCESS final_payable=" << result.final_payable << std::endl;
     } else {
-        std::cout << "status=FAIL message=" << result["message"] << std::endl;
+        std::cout << "status=FAIL message=Invalid request" << std::endl;
     }
     return 0;
 }

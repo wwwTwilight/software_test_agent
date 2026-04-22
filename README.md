@@ -20,6 +20,32 @@ conda activate testAgent
 1. 环境变量 `DEEPSEEK_API_KEY`
 2. 文件 `analysis_agent/deepseekAPI`
 
+## Web 可视化界面（推荐）
+
+先安装依赖（仅一次）：
+
+```bash
+pip install flask
+```
+
+启动 Web 服务：
+
+```bash
+python web/app.py
+```
+
+浏览器打开：
+
+```text
+http://127.0.0.1:8080
+```
+
+界面功能：
+- 上传待测代码（.cpp）、规格说明书（.md/.txt）、测试样例 JSON
+- 或在页面中手工录入 input/output，自动生成测试样例 JSON
+- 一键执行完整流程：生成用例 -> 运行黑白盒测试 -> 生成缺陷分析报告
+- 页面展示黑白盒通过率、失败用例和最终 Markdown 分析报告
+
 ## 一键运行（推荐）
 
 在项目根目录执行：

@@ -69,15 +69,50 @@ def call_deepseek(api_key: str, model: str, prompt: str, base_url: str, temperat
 
 
 def extract_model_text(response_payload: dict[str, Any]) -> str:
+    def normalize_text_field(value: Any) -> str:
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            parts: list[str] = []
+            for item in value:
+                if isinstance(item, str):
+                    if item.strip():
+                        parts.append(item.strip())
+                    continue
+                if isinstance(item, dict):
+                    text_part = item.get("text")
+                    if isinstance(text_part, str) and text_part.strip():
+                        parts.append(text_part.strip())
+            return "\n".join(parts).strip()
+        if isinstance(value, dict):
+            text_part = value.get("text")
+            if isinstance(text_part, str):
+                return text_part.strip()
+        return ""
+
     choices = response_payload.get("choices") or []
     if not choices:
         raise ValueError("API 响应中缺少 choices 字段")
     first_choice = choices[0] or {}
     message = first_choice.get("message") or {}
-    text = message.get("content")
-    if not isinstance(text, str) or not text.strip():
-        raise ValueError("API 响应中缺少 message.content")
-    return text.strip()
+    candidates = [
+        message.get("content"),
+        message.get("reasoning_content"),
+        first_choice.get("text"),
+        first_choice.get("content"),
+    ]
+
+    for candidate in candidates:
+        normalized = normalize_text_field(candidate)
+        if normalized:
+            return normalized
+
+    message_keys = ", ".join(sorted(message.keys())) or "<empty>"
+    choice_keys = ", ".join(sorted(first_choice.keys())) or "<empty>"
+    raise ValueError(
+        "API 响应中缺少可用文本字段："
+        f"message keys=[{message_keys}], choice keys=[{choice_keys}]"
+    )
 
 
 def collect_reports(report_paths: list[Path]) -> list[dict[str, Any]]:

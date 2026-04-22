@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>软件测试智能体任务面板</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;700;800&family=IBM+Plex+Sans+SC:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="noise"></div>
+    <main class="page">
+      <header class="topbar">
+        <div class="brand-block">
+          <p class="kicker">Software Test Agent</p>
+          <h1>测试任务面板</h1>
+          <p class="subtitle">从代码输入到缺陷分析，一次点击完成生成、执行与报告聚合。</p>
+        </div>
+        <div class="flow-map">
+          <span>01 生成用例</span>
+          <span>02 黑盒执行</span>
+          <span>03 白盒执行</span>
+          <span>04 生成报告</span>
+        </div>
+      </header>
+
+      {% if error %}
+      <section class="panel panel-error">
+        <h2>运行错误</h2>
+        <pre>{{ error }}</pre>
+      </section>
+      {% endif %}
+
+      <section class="layout">
+        <article class="panel form-panel">
+          <div class="panel-head">
+            <h2>Pipeline Config</h2>
+            <p>配置参数与输入来源</p>
+          </div>
+
+          <form id="pipeline-form" action="/run" method="post" enctype="multipart/form-data">
+            <div class="section-tag">运行参数</div>
+            <div class="grid two">
+              <label class="field">
+                <span>DeepSeek Base URL</span>
+                <input type="text" name="base_url" value="https://api.deepseek.com" />
+              </label>
+              <label class="field">
+                <span>生成模型</span>
+                <input type="text" name="generate_model" value="deepseek-reasoner" />
+              </label>
+              <label class="field">
+                <span>分析模型</span>
+                <input type="text" name="summary_model" value="deepseek-reasoner" />
+              </label>
+            </div>
+
+            <label class="field">
+              <span>生成模式</span>
+              <select name="generate_mode">
+                <option value="all">all（黑盒 + 白盒）</option>
+                <option value="blackbox">blackbox（仅黑盒）</option>
+                <option value="whitebox">whitebox（仅白盒）</option>
+              </select>
+            </label>
+
+            <div class="section-tag">项目输入</div>
+            <div class="grid two">
+              <label class="field">
+                <span>待测代码（.cpp）</span>
+                <input type="file" name="code_file" accept=".cpp,.cc,.cxx,.c" />
+              </label>
+              <label class="field">
+                <span>规格说明书（.md/.txt）</span>
+                <input type="file" name="spec_file" accept=".md,.txt" />
+              </label>
+            </div>
+
+            <div class="section-tag">测试样例</div>
+            <div class="mode-switch">
+              <label><input type="radio" name="case_mode" value="upload" checked /> 上传 JSON</label>
+              <label><input type="radio" name="case_mode" value="manual" /> 手工录入</label>
+            </div>
+
+            <label class="field" id="upload-cases-wrap">
+              <span>测试样例 JSON</span>
+              <input type="file" name="cases_file" accept=".json" />
+            </label>
+
+            <div class="manual-wrap hidden" id="manual-cases-wrap">
+              <p class="manual-tip">填入 id / input / output。可动态增删，提交时自动打包成 JSON。</p>
+              <table class="editor-table" id="manual-table">
+                <thead>
+                  <tr>
+                    <th style="width: 96px">id</th>
+                    <th>input</th>
+                    <th>output</th>
+                    <th style="width: 78px">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><input class="case-id" value="001" /></td>
+                    <td><textarea class="case-input" rows="3" placeholder="Beijing\n1\nSKU_001 Item 10 1 0.1 0 10\n0\n"></textarea></td>
+                    <td><textarea class="case-output" rows="3" placeholder="status=SUCCESS final_payable=10"></textarea></td>
+                    <td><button type="button" class="btn btn-ghost remove-row">删</button></td>
+                  </tr>
+                </tbody>
+              </table>
+              <div class="manual-actions">
+                <button type="button" class="btn btn-ghost" id="add-row">+ 新增用例行</button>
+                <span class="row-count" id="row-count">当前 1 条</span>
+              </div>
+              <input type="hidden" name="manual_cases_json" id="manual_cases_json" value="[]" />
+            </div>
+
+            <div class="submit-row">
+              <button class="btn btn-main" type="submit" id="run-btn">运行完整流程</button>
+              <span class="submit-hint">预计执行 20-90 秒</span>
+            </div>
+          </form>
+        </article>
+
+        <article class="panel output-panel">
+          <div class="panel-head">
+            <h2>Execution Output</h2>
+            <p>测试结果与分析报告</p>
+          </div>
+
+          {% if result %}
+          <div class="stats-grid">
+            <section class="stat-card">
+              <h3>黑盒测试</h3>
+              <div class="metrics">
+                <div><span>总数</span><strong>{{ result.blackbox.summary.total_tests or 0 }}</strong></div>
+                <div><span>通过</span><strong>{{ result.blackbox.summary.passed or 0 }}</strong></div>
+                <div><span>失败</span><strong>{{ result.blackbox.summary.failed or 0 }}</strong></div>
+                <div><span>通过率</span><strong>{{ result.blackbox.summary.pass_rate or '0%' }}</strong></div>
+              </div>
+              {% if result.blackbox.failed_cases %}
+              <ul class="fail-list">
+                {% for case in result.blackbox.failed_cases[:10] %}
+                <li>[{{ case.id }}] {{ case.message }}</li>
+                {% endfor %}
+              </ul>
+              {% else %}
+              <p class="state-ok">无失败用例</p>
+              {% endif %}
+            </section>
+
+            <section class="stat-card">
+              <h3>白盒测试</h3>
+              <div class="metrics">
+                <div><span>总数</span><strong>{{ result.whitebox.summary.total_tests or 0 }}</strong></div>
+                <div><span>通过</span><strong>{{ result.whitebox.summary.passed or 0 }}</strong></div>
+                <div><span>失败</span><strong>{{ result.whitebox.summary.failed or 0 }}</strong></div>
+                <div><span>通过率</span><strong>{{ result.whitebox.summary.pass_rate or '0%' }}</strong></div>
+              </div>
+              {% if result.whitebox.failed_cases %}
+              <ul class="fail-list">
+                {% for case in result.whitebox.failed_cases[:10] %}
+                <li>[{{ case.id }}] {{ case.message }}</li>
+                {% endfor %}
+              </ul>
+              {% else %}
+              <p class="state-ok">无失败用例</p>
+              {% endif %}
+            </section>
+          </div>
+
+          <section class="doc-block">
+            <h3>最终分析报告</h3>
+            <script type="text/plain" id="markdown-source">{{ result.final_report_md }}</script>
+            <article class="markdown-view markdown-rendered" id="markdown-rendered"></article>
+          </section>
+
+          <section class="doc-block">
+            <h3>执行日志</h3>
+            <pre>{{ result.logs }}</pre>
+          </section>
+          {% else %}
+          <div class="empty-state">
+            <p>尚未运行任务。</p>
+            <p>完成左侧配置后点击「运行完整流程」，结果会显示在这里。</p>
+          </div>
+          {% endif %}
+        </article>
+      </section>
+    </main>
+
+    <div class="run-overlay hidden" id="run-overlay">
+      <div class="overlay-shell">
+        <div class="overlay-top">
+          <div class="overlay-orbit" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+          <div>
+            <p class="overlay-kicker">Pipeline Running</p>
+            <h2>任务执行中</h2>
+            <p class="overlay-message" id="overlay-message">正在唤起模型与测试链路...</p>
+          </div>
+        </div>
+
+        <div class="overlay-status-row">
+          <span class="status-chip" id="overlay-stage">初始化</span>
+          <span class="status-note">请勿关闭页面，结果完成后会自动返回</span>
+        </div>
+
+        <div class="overlay-progress">
+          <div class="overlay-progress-bar"></div>
+        </div>
+
+        <div class="overlay-steps">
+          <div class="overlay-step" data-step="generate">生成用例</div>
+          <div class="overlay-step" data-step="run">运行测试</div>
+          <div class="overlay-step" data-step="summary">生成报告</div>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

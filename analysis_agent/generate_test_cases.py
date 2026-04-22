@@ -14,6 +14,7 @@ from urllib import error, request
 
 DEFAULT_MODEL = "deepseek-reasoner"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
+DEFAULT_MAX_TOKENS = 8192
 JSON_START_MARKER = "<<<json_start>>>"
 JSON_END_MARKER = "<<<json_end>>>"
 
@@ -255,16 +256,74 @@ def call_deepseek(api_key: str, model: str, prompt: str, base_url: str, temperat
 
 
 def extract_model_text(response_payload: dict[str, Any]) -> str:
+    def normalize_text_field(value: Any) -> str:
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            parts: list[str] = []
+            for item in value:
+                if isinstance(item, str):
+                    if item.strip():
+                        parts.append(item.strip())
+                    continue
+                if isinstance(item, dict):
+                    text_part = item.get("text")
+                    if isinstance(text_part, str) and text_part.strip():
+                        parts.append(text_part.strip())
+            return "\n".join(parts).strip()
+        if isinstance(value, dict):
+            text_part = value.get("text")
+            if isinstance(text_part, str):
+                return text_part.strip()
+        return ""
+
     choices = response_payload.get("choices") or []
     if not choices:
         raise ValueError("API 响应中缺少 choices 字段")
 
     first_choice = choices[0] or {}
     message = first_choice.get("message") or {}
-    text = message.get("content")
-    if not isinstance(text, str) or not text.strip():
-        raise ValueError("API 响应中缺少 message.content")
-    return text
+    candidates = [
+        message.get("content"),
+        message.get("reasoning_content"),
+        first_choice.get("text"),
+        first_choice.get("content"),
+    ]
+
+    for candidate in candidates:
+        normalized = normalize_text_field(candidate)
+        if normalized:
+            return normalized
+
+    message_keys = ", ".join(sorted(message.keys())) or "<empty>"
+    choice_keys = ", ".join(sorted(first_choice.keys())) or "<empty>"
+    raise ValueError(
+        "API 响应中缺少可用文本字段："
+        f"message keys=[{message_keys}], choice keys=[{choice_keys}]"
+    )
+
+
+def extract_finish_reason(response_payload: dict[str, Any]) -> str:
+    choices = response_payload.get("choices") or []
+    if not choices:
+        return ""
+    first_choice = choices[0] or {}
+    reason = first_choice.get("finish_reason")
+    return reason if isinstance(reason, str) else ""
+
+
+def build_retry_prompt(original_prompt: str) -> str:
+    retry_suffix = """
+
+上一次输出疑似被长度截断。请重新生成完整结果，并严格遵守：
+1. 不要输出简短分析。
+2. 只输出被标记包裹的 JSON：
+<<<json_start>>>
+...JSON...
+<<<json_end>>>
+3. 标记之间仅允许 JSON 文本。
+"""
+    return original_prompt + retry_suffix
 
 
 def find_json_candidate(text: str) -> str:
@@ -404,7 +463,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default=DEFAULT_MODEL, help="DeepSeek 模型名。")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="DeepSeek API 基础地址。")
     parser.add_argument("--temperature", type=float, default=0.2, help="生成温度。")
-    parser.add_argument("--max-tokens", type=int, default=4096, help="最大输出 token 数。")
+    parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS, help="最大输出 token 数。")
     parser.add_argument("--print-json", action="store_true", help="将提取出的 JSON 额外打印到标准输出。")
     parser.add_argument(
         "--mode",
@@ -468,10 +527,42 @@ def main() -> int:
         try:
             blackbox_json, blackbox_json_text = parse_json_with_recovery(blackbox_model_text)
         except Exception as exc:
-            raw_path = blackbox_dir / "last_llm_raw_response.txt"
-            raw_path.write_text(json.dumps(blackbox_response, ensure_ascii=False, indent=2), encoding="utf-8")
-            error_message = f"黑盒测试 JSON 解析失败。原始响应已保存到 {raw_path}. 错误: {exc}"
-            raise RuntimeError(error_message) from exc
+            finish_reason = extract_finish_reason(blackbox_response)
+            if finish_reason == "length":
+                print("[WARN] 黑盒响应被截断，自动重试一次...")
+                retry_response = call_deepseek(
+                    api_key=api_key,
+                    model=args.model,
+                    prompt=build_retry_prompt(blackbox_prompt),
+                    base_url=args.base_url,
+                    temperature=min(args.temperature, 0.2),
+                    max_tokens=min(max(args.max_tokens * 2, DEFAULT_MAX_TOKENS), 16384),
+                )
+                retry_model_text = extract_model_text(retry_response)
+                try:
+                    blackbox_json, blackbox_json_text = parse_json_with_recovery(retry_model_text)
+                    blackbox_response = retry_response
+                    blackbox_model_text = retry_model_text
+                except Exception as retry_exc:
+                    raw_path = blackbox_dir / "last_llm_raw_response.txt"
+                    raw_path.write_text(
+                        json.dumps(
+                            {
+                                "first_response": blackbox_response,
+                                "retry_response": retry_response,
+                            },
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
+                        encoding="utf-8",
+                    )
+                    error_message = f"黑盒测试 JSON 解析失败（已自动重试一次）。原始响应已保存到 {raw_path}. 首次错误: {exc}; 重试错误: {retry_exc}"
+                    raise RuntimeError(error_message) from retry_exc
+            else:
+                raw_path = blackbox_dir / "last_llm_raw_response.txt"
+                raw_path.write_text(json.dumps(blackbox_response, ensure_ascii=False, indent=2), encoding="utf-8")
+                error_message = f"黑盒测试 JSON 解析失败。原始响应已保存到 {raw_path}. 错误: {exc}"
+                raise RuntimeError(error_message) from exc
         
         _, bb_md_path, bb_json_path, bb_manifest_path = save_outputs(
             output_subdir=blackbox_dir,
@@ -504,10 +595,42 @@ def main() -> int:
         try:
             whitebox_json, whitebox_json_text = parse_json_with_recovery(whitebox_model_text)
         except Exception as exc:
-            raw_path = whitebox_dir / "last_llm_raw_response.txt"
-            raw_path.write_text(json.dumps(whitebox_response, ensure_ascii=False, indent=2), encoding="utf-8")
-            error_message = f"白盒测试 JSON 解析失败。原始响应已保存到 {raw_path}. 错误: {exc}"
-            raise RuntimeError(error_message) from exc
+            finish_reason = extract_finish_reason(whitebox_response)
+            if finish_reason == "length":
+                print("[WARN] 白盒响应被截断，自动重试一次...")
+                retry_response = call_deepseek(
+                    api_key=api_key,
+                    model=args.model,
+                    prompt=build_retry_prompt(whitebox_prompt),
+                    base_url=args.base_url,
+                    temperature=min(args.temperature, 0.2),
+                    max_tokens=min(max(args.max_tokens * 2, DEFAULT_MAX_TOKENS), 16384),
+                )
+                retry_model_text = extract_model_text(retry_response)
+                try:
+                    whitebox_json, whitebox_json_text = parse_json_with_recovery(retry_model_text)
+                    whitebox_response = retry_response
+                    whitebox_model_text = retry_model_text
+                except Exception as retry_exc:
+                    raw_path = whitebox_dir / "last_llm_raw_response.txt"
+                    raw_path.write_text(
+                        json.dumps(
+                            {
+                                "first_response": whitebox_response,
+                                "retry_response": retry_response,
+                            },
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
+                        encoding="utf-8",
+                    )
+                    error_message = f"白盒测试 JSON 解析失败（已自动重试一次）。原始响应已保存到 {raw_path}. 首次错误: {exc}; 重试错误: {retry_exc}"
+                    raise RuntimeError(error_message) from retry_exc
+            else:
+                raw_path = whitebox_dir / "last_llm_raw_response.txt"
+                raw_path.write_text(json.dumps(whitebox_response, ensure_ascii=False, indent=2), encoding="utf-8")
+                error_message = f"白盒测试 JSON 解析失败。原始响应已保存到 {raw_path}. 错误: {exc}"
+                raise RuntimeError(error_message) from exc
         
         _, wb_md_path, wb_json_path, wb_manifest_path = save_outputs(
             output_subdir=whitebox_dir,
